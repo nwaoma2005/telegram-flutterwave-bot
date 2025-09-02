@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import requests
+import time
 from flask import Flask, request, jsonify
 from telegram import Bot
 from telegram.error import TelegramError
@@ -65,31 +66,50 @@ class FlutterwavePaymentBot:
     def add_user_to_channel(self, user_id, username=None):
         """Add user to Telegram private channel"""
         try:
-            # Add user to channel
-            bot.unban_chat_member(
+            # Create invite link for the user
+            invite_link = bot.create_chat_invite_link(
                 chat_id=TELEGRAM_CHANNEL_ID,
-                user_id=user_id
+                member_limit=1,
+                name=f"Payment access for user {user_id}"
             )
             
-            # Send welcome message
-            welcome_message = f"Welcome! You've been added to the private channel after successful payment."
+            # Send invite link to user
+            welcome_message = f"🎉 Payment successful! Here's your exclusive access link:\n\n{invite_link.invite_link}\n\nWelcome to the premium channel!"
             if username:
-                welcome_message = f"Welcome @{username}! You've been added to the private channel after successful payment."
+                welcome_message = f"🎉 Hello @{username}! Payment successful!\n\nHere's your exclusive access link:\n{invite_link.invite_link}\n\nWelcome to the premium channel!"
                 
             bot.send_message(
                 chat_id=user_id,
                 text=welcome_message
             )
             
-            logger.info(f"Successfully added user {user_id} to channel")
+            logger.info(f"Successfully sent invite link to user {user_id}")
             return True
             
         except TelegramError as e:
             logger.error(f"Error adding user to channel: {e}")
-            return False
+            # Fallback: try direct add
+            try:
+                bot.unban_chat_member(chat_id=TELEGRAM_CHANNEL_ID, user_id=user_id)
+                bot.send_message(chat_id=user_id, text="Payment successful! You've been added to the channel.")
+                return True
+            except:
+                return False
 
 # Initialize the payment bot
 payment_bot = FlutterwavePaymentBot()
+
+@app.route('/', methods=['GET'])
+def home():
+    """Home endpoint to verify bot is running"""
+    return jsonify({
+        "status": "Bot is running!",
+        "endpoints": {
+            "webhook": "/webhook/flutterwave",
+            "create_payment": "/create-payment", 
+            "health": "/health"
+        }
+    })
 
 @app.route('/webhook/flutterwave', methods=['POST'])
 def flutterwave_webhook():
