@@ -270,7 +270,7 @@ def create_payment():
             "tx_ref": f"payment_{telegram_user_id}_{int(time.time())}",
             "amount": amount,
             "currency": currency,
-            "redirect_url": "https://your-success-page.com",
+            "redirect_url": "https://telegram-flutterwave-bot-2.onrender.com/health",,
             "customer": {
                 "email": email,
                 "name": telegram_username or f"User_{telegram_user_id}"
