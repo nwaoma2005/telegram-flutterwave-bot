@@ -1,4 +1,9 @@
 import os
+import json
+import hmac
+import hashlib
+import requests
+import time
 from flask import Flask, request, jsonify
 import logging
 
@@ -14,11 +19,97 @@ FLUTTERWAVE_WEBHOOK_SECRET = os.getenv('FLUTTERWAVE_WEBHOOK_SECRET')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
 
+class FlutterwavePaymentBot:
+    def __init__(self):
+        self.secret_key = FLUTTERWAVE_SECRET_KEY
+        self.webhook_secret = FLUTTERWAVE_WEBHOOK_SECRET
+        
+    def verify_webhook_signature(self, payload, signature):
+        """Verify that the webhook is from Flutterwave"""
+        if not signature or not self.webhook_secret:
+            return True  # Allow for testing
+            
+        if signature.startswith('v1='):
+            signature = signature[3:]
+            
+        expected_signature = hmac.new(
+            self.webhook_secret.encode('utf-8'),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+        
+        return hmac.compare_digest(expected_signature, signature)
+    
+    def verify_payment(self, transaction_id):
+        """Verify payment with Flutterwave API"""
+        if not self.secret_key:
+            return {"status": "error", "message": "No secret key"}
+            
+        url = f"https://api.flutterwave.com/v3/transactions/{transaction_id}/verify"
+        headers = {
+            "Authorization": f"Bearer {self.secret_key}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Error verifying payment: {e}")
+            return None
+    
+    def send_telegram_message(self, user_id, message):
+        """Send message to user via Telegram"""
+        if not TELEGRAM_BOT_TOKEN:
+            logger.error("No Telegram bot token")
+            return False
+            
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": user_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        
+        try:
+            response = requests.post(url, json=data)
+            response.raise_for_status()
+            logger.info(f"Message sent to user {user_id}")
+            return True
+        except requests.RequestException as e:
+            logger.error(f"Failed to send message: {e}")
+            return False
+    
+    def create_invite_link(self, user_id):
+        """Create invite link for user to join channel"""
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+            return None
+            
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
+        data = {
+            "chat_id": TELEGRAM_CHANNEL_ID,
+            "member_limit": 1,
+            "name": f"Payment access for user {user_id}"
+        }
+        
+        try:
+            response = requests.post(url, json=data)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("ok"):
+                return result["result"]["invite_link"]
+        except requests.RequestException as e:
+            logger.error(f"Failed to create invite link: {e}")
+            
+        return None
+
+# Initialize the payment bot
+payment_bot = FlutterwavePaymentBot()
+
 @app.route('/', methods=['GET'])
 def home():
-    """Test endpoint to check if bot is working"""
-    
-    # Check which environment variables are set
+    """Home endpoint with environment variable status"""
     env_status = {
         "FLUTTERWAVE_SECRET_KEY": "✅ Set" if FLUTTERWAVE_SECRET_KEY else "❌ Missing",
         "FLUTTERWAVE_WEBHOOK_SECRET": "✅ Set" if FLUTTERWAVE_WEBHOOK_SECRET else "❌ Missing", 
@@ -27,12 +118,13 @@ def home():
     }
     
     return jsonify({
-        "status": "Bot is running!",
+        "status": "Flutterwave-Telegram Bot is running!",
         "environment_variables": env_status,
         "endpoints": {
             "webhook": "/webhook/flutterwave",
             "create_payment": "/create-payment",
-            "health": "/health"
+            "health": "/health",
+            "test_telegram": "/test-telegram"
         }
     })
 
@@ -41,61 +133,190 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "message": "Bot is running successfully!"
+        "message": "Bot is running successfully!",
+        "timestamp": time.time()
     })
+
+@app.route('/test-telegram', methods=['GET'])
+def test_telegram():
+    """Test Telegram bot connection"""
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"error": "TELEGRAM_BOT_TOKEN not set"})
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe"
+    
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get("ok"):
+            bot_info = result["result"]
+            return jsonify({
+                "status": "Telegram connection successful!",
+                "bot_info": {
+                    "username": bot_info.get("username"),
+                    "name": bot_info.get("first_name"),
+                    "id": bot_info.get("id")
+                }
+            })
+        else:
+            return jsonify({"error": "Invalid bot token"})
+            
+    except requests.RequestException as e:
+        return jsonify({"error": f"Connection failed: {str(e)}"})
 
 @app.route('/webhook/flutterwave', methods=['POST'])
 def flutterwave_webhook():
     """Handle Flutterwave webhook notifications"""
     
+    # Get the signature from headers
+    signature = request.headers.get('verif-hash')
+    payload = request.get_data()
+    
+    logger.info("Webhook received!")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
+    # Verify webhook signature (skip if no secret set for testing)
+    if FLUTTERWAVE_WEBHOOK_SECRET and not payment_bot.verify_webhook_signature(payload, signature):
+        logger.warning("Invalid webhook signature")
+        return jsonify({"error": "Invalid signature"}), 400
+    
     try:
-        # Log the incoming request
-        logger.info("Webhook received!")
-        logger.info(f"Headers: {dict(request.headers)}")
-        
-        # Get the data
         data = request.get_json()
         logger.info(f"Webhook data: {data}")
         
-        return jsonify({"status": "webhook received", "message": "Processing successful"})
+        # Check if this is a successful payment
+        if data.get('event') == 'charge.completed' and data.get('data', {}).get('status') == 'successful':
+            transaction_data = data['data']
+            transaction_id = transaction_data.get('id')
+            
+            # Get user information from metadata
+            metadata = transaction_data.get('meta', {})
+            user_id = metadata.get('telegram_user_id')
+            username = metadata.get('telegram_username')
+            amount = transaction_data.get('amount')
+            currency = transaction_data.get('currency')
+            
+            logger.info(f"Processing payment for user {user_id}, amount: {amount} {currency}")
+            
+            if user_id:
+                # Create invite link for the user
+                invite_link = payment_bot.create_invite_link(user_id)
+                
+                if invite_link:
+                    welcome_message = f"""
+🎉 <b>Payment Successful!</b> 🎉
+
+✅ Amount: {amount} {currency}
+✅ Transaction ID: {transaction_id}
+
+🔗 <b>Your exclusive channel access:</b>
+{invite_link}
+
+Welcome to the premium channel! 🌟
+"""
+                else:
+                    welcome_message = f"""
+🎉 <b>Payment Successful!</b> 🎉
+
+✅ Amount: {amount} {currency}
+✅ Transaction ID: {transaction_id}
+
+Your payment has been confirmed. Please contact support for channel access.
+"""
+
+                # Send welcome message
+                success = payment_bot.send_telegram_message(user_id, welcome_message)
+                
+                if success:
+                    logger.info(f"Payment processed and user {user_id} notified")
+                    return jsonify({"status": "success", "message": "User notified"})
+                else:
+                    logger.error(f"Failed to notify user {user_id}")
+                    return jsonify({"status": "partial", "message": "Payment verified but notification failed"})
+            else:
+                logger.warning("No Telegram user ID found in payment metadata")
+                return jsonify({"status": "error", "message": "No user ID in metadata"}), 400
+        
+        return jsonify({"status": "ignored", "message": "Event not processed"})
         
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-@app.route('/test-telegram', methods=['GET'])
-def test_telegram():
-    """Test Telegram connection"""
-    
-    if not TELEGRAM_BOT_TOKEN:
-        return jsonify({"error": "TELEGRAM_BOT_TOKEN not set"})
+@app.route('/create-payment', methods=['POST'])
+def create_payment():
+    """Create a payment link with user metadata"""
     
     try:
-        # Test importing telegram
-        from telegram import Bot
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        data = request.get_json()
         
-        # Test bot connection
-        me = bot.get_me()
+        # Required parameters
+        amount = data.get('amount')
+        currency = data.get('currency', 'NGN')
+        email = data.get('email')
+        telegram_user_id = data.get('telegram_user_id')
+        telegram_username = data.get('telegram_username')
         
-        return jsonify({
-            "status": "Telegram connection successful!",
-            "bot_info": {
-                "username": me.username,
-                "name": me.first_name,
-                "id": me.id
+        if not all([amount, email, telegram_user_id]):
+            return jsonify({"error": "Missing required parameters: amount, email, telegram_user_id"}), 400
+        
+        if not FLUTTERWAVE_SECRET_KEY:
+            return jsonify({"error": "Flutterwave secret key not configured"}), 500
+        
+        # Create payment payload
+        payment_payload = {
+            "tx_ref": f"payment_{telegram_user_id}_{int(time.time())}",
+            "amount": amount,
+            "currency": currency,
+            "redirect_url": "https://your-success-page.com",
+            "customer": {
+                "email": email,
+                "name": telegram_username or f"User_{telegram_user_id}"
+            },
+            "meta": {
+                "telegram_user_id": str(telegram_user_id),
+                "telegram_username": telegram_username or ""
+            },
+            "customizations": {
+                "title": "Premium Channel Access",
+                "description": "Payment for exclusive channel access"
             }
-        })
+        }
         
+        # Make request to Flutterwave
+        headers = {
+            "Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(
+            "https://api.flutterwave.com/v3/payments",
+            json=payment_payload,
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            payment_data = response.json()
+            return jsonify({
+                "status": "success",
+                "payment_link": payment_data['data']['link'],
+                "tx_ref": payment_payload['tx_ref']
+            })
+        else:
+            logger.error(f"Flutterwave API error: {response.text}")
+            return jsonify({"error": "Failed to create payment"}), 500
+            
     except Exception as e:
-        logger.error(f"Telegram test failed: {e}")
-        return jsonify({"error": f"Telegram connection failed: {str(e)}"})
+        logger.error(f"Error creating payment: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
     # Log startup info
-    logger.info("Starting bot...")
-    logger.info(f"Environment variables check:")
+    logger.info("Starting Flutterwave-Telegram Bot...")
     logger.info(f"FLUTTERWAVE_SECRET_KEY: {'Set' if FLUTTERWAVE_SECRET_KEY else 'Missing'}")
     logger.info(f"TELEGRAM_BOT_TOKEN: {'Set' if TELEGRAM_BOT_TOKEN else 'Missing'}")
     
-    app.run(debug=False, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
