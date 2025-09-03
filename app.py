@@ -59,7 +59,7 @@ class FlutterwavePaymentBot:
             logger.error(f"Error verifying payment: {e}")
             return None
     
-    def send_telegram_message(self, user_id, message):
+    def send_telegram_message(self, user_id, message, reply_markup=None):
         """Send message to user via Telegram"""
         if not TELEGRAM_BOT_TOKEN:
             logger.error("No Telegram bot token")
@@ -69,8 +69,12 @@ class FlutterwavePaymentBot:
         data = {
             "chat_id": user_id,
             "text": message,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
         }
+        
+        if reply_markup:
+            data["reply_markup"] = reply_markup
         
         try:
             response = requests.post(url, json=data)
@@ -90,7 +94,8 @@ class FlutterwavePaymentBot:
         data = {
             "chat_id": TELEGRAM_CHANNEL_ID,
             "member_limit": 1,
-            "name": f"Payment access for user {user_id}"
+            "name": f"Payment access for user {user_id}",
+            "expire_date": int(time.time()) + (7 * 24 * 60 * 60)  # Expires in 7 days
         }
         
         try:
@@ -103,6 +108,73 @@ class FlutterwavePaymentBot:
             logger.error(f"Failed to create invite link: {e}")
             
         return None
+    
+    def process_telegram_update(self, update_data):
+        """Process incoming Telegram messages"""
+        try:
+            if "message" not in update_data:
+                return
+                
+            message = update_data["message"]
+            user_id = message["from"]["id"]
+            username = message["from"].get("username", "")
+            first_name = message["from"].get("first_name", "User")
+            text = message.get("text", "")
+            
+            logger.info(f"Message from user {user_id}: {text}")
+            
+            # Handle /start command
+            if text.startswith("/start"):
+                welcome_message = f"""
+🌟 <b>Welcome to Premium Channel Access Bot!</b> 🌟
+
+Hello {first_name}! 👋
+
+I help you get access to exclusive premium content through secure payments.
+
+<b>📋 How it works:</b>
+1️⃣ Click the payment link below
+2️⃣ Enter your details and pay securely via Flutterwave  
+3️⃣ After successful payment, I'll send you the channel invite link instantly
+4️⃣ Join and enjoy exclusive premium content!
+
+<b>🔗 Generate Your Payment Link:</b>
+👉 https://telegram-flutterwave-bot-2.onrender.com/payment-form
+
+<b>📝 Important Instructions:</b>
+• Get your Telegram ID from @raw_data_bot first
+• Use the same email for payment that you'll use for support
+• Your channel access link will be sent here after payment
+• Links expire in 7 days, so use them quickly!
+
+<b>💳 Secure Payment:</b> All payments processed via Flutterwave - completely safe and secure.
+
+Need help? Just message me anytime! 🚀
+"""
+                
+                # Send welcome message
+                self.send_telegram_message(user_id, welcome_message)
+                
+            # Handle other messages
+            else:
+                help_message = f"""
+Hi {first_name}! 👋
+
+To get access to the premium channel:
+
+1️⃣ <b>Generate payment link:</b>
+👉 https://telegram-flutterwave-bot-2.onrender.com/payment-form
+
+2️⃣ <b>Get your Telegram ID from @raw_data_bot</b>
+
+3️⃣ <b>Complete payment</b> - I'll send your channel link instantly!
+
+Type /start to see the full welcome message.
+"""
+                self.send_telegram_message(user_id, help_message)
+                
+        except Exception as e:
+            logger.error(f"Error processing Telegram update: {e}")
 
 # Initialize the payment bot
 payment_bot = FlutterwavePaymentBot()
@@ -119,10 +191,13 @@ def home():
     
     return jsonify({
         "status": "Flutterwave-Telegram Bot is running!",
+        "bot_username": "@payblessedbot",
         "environment_variables": env_status,
         "endpoints": {
             "webhook": "/webhook/flutterwave",
+            "telegram_webhook": "/webhook/telegram",
             "create_payment": "/create-payment",
+            "payment_form": "/payment-form",
             "health": "/health",
             "test_telegram": "/test-telegram"
         }
@@ -166,6 +241,21 @@ def test_telegram():
     except requests.RequestException as e:
         return jsonify({"error": f"Connection failed: {str(e)}"})
 
+@app.route('/webhook/telegram', methods=['POST'])
+def telegram_webhook():
+    """Handle incoming Telegram messages"""
+    try:
+        update_data = request.get_json()
+        logger.info(f"Telegram webhook received: {update_data}")
+        
+        payment_bot.process_telegram_update(update_data)
+        
+        return jsonify({"status": "ok"})
+        
+    except Exception as e:
+        logger.error(f"Error processing Telegram webhook: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/webhook/flutterwave', methods=['POST'])
 def flutterwave_webhook():
     """Handle Flutterwave webhook notifications"""
@@ -174,7 +264,7 @@ def flutterwave_webhook():
     signature = request.headers.get('verif-hash')
     payload = request.get_data()
     
-    logger.info("Webhook received!")
+    logger.info("Flutterwave webhook received!")
     logger.info(f"Headers: {dict(request.headers)}")
     
     # Verify webhook signature (skip if no secret set for testing)
@@ -206,30 +296,57 @@ def flutterwave_webhook():
                 
                 if invite_link:
                     welcome_message = f"""
-🎉 <b>Payment Successful!</b> 🎉
+🎉 <b>PAYMENT SUCCESSFUL!</b> 🎉
 
-✅ Amount: {amount} {currency}
-✅ Transaction ID: {transaction_id}
+✅ <b>Amount:</b> {amount} {currency}
+✅ <b>Transaction ID:</b> {transaction_id}
+✅ <b>Status:</b> Confirmed
 
-🔗 <b>Your exclusive channel access:</b>
+🔗 <b>YOUR EXCLUSIVE CHANNEL ACCESS:</b>
+
 {invite_link}
 
-Welcome to the premium channel! 🌟
+🌟 <b>Welcome to the Premium Channel!</b> 
+
+<b>⚠️ IMPORTANT:</b>
+• This link expires in 7 days
+• Click the link above to join instantly  
+• Save this message for future reference
+• Enjoy exclusive premium content!
+
+Thank you for your payment! 🚀
 """
+                    
+                    # Also send a simple message with just the link for easy access
+                    simple_link_message = f"""
+🔗 <b>Quick Access Link:</b>
+
+{invite_link}
+
+Tap to join the premium channel instantly!
+"""
+                    
                 else:
                     welcome_message = f"""
-🎉 <b>Payment Successful!</b> 🎉
+🎉 <b>PAYMENT SUCCESSFUL!</b> 🎉
 
-✅ Amount: {amount} {currency}
-✅ Transaction ID: {transaction_id}
+✅ <b>Amount:</b> {amount} {currency}
+✅ <b>Transaction ID:</b> {transaction_id}
 
-Your payment has been confirmed. Please contact support for channel access.
+Your payment has been confirmed! 
+
+⚠️ There was a technical issue generating your channel link. Please contact support with your transaction ID: {transaction_id}
+
+We'll manually add you to the channel within 24 hours.
 """
+                    simple_link_message = "Please contact support for manual channel access."
 
-                # Send welcome message
-                success = payment_bot.send_telegram_message(user_id, welcome_message)
+                # Send both messages
+                success1 = payment_bot.send_telegram_message(user_id, welcome_message)
+                time.sleep(1)  # Small delay between messages
+                success2 = payment_bot.send_telegram_message(user_id, simple_link_message)
                 
-                if success:
+                if success1 or success2:
                     logger.info(f"Payment processed and user {user_id} notified")
                     return jsonify({"status": "success", "message": "User notified"})
                 else:
@@ -270,7 +387,7 @@ def create_payment():
             "tx_ref": f"payment_{telegram_user_id}_{int(time.time())}",
             "amount": amount,
             "currency": currency,
-            "redirect_url": "https://telegram-flutterwave-bot-2.onrender.com/health",,
+            "redirect_url": "https://telegram-flutterwave-bot-2.onrender.com/payment-success",
             "customer": {
                 "email": email,
                 "name": telegram_username or f"User_{telegram_user_id}"
@@ -311,133 +428,216 @@ def create_payment():
     except Exception as e:
         logger.error(f"Error creating payment: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/payment-success', methods=['GET'])
+def payment_success():
+    """Success page after payment"""
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Payment Successful!</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f8ff; }
+            .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+            h1 { color: #4CAF50; margin-bottom: 20px; }
+            .emoji { font-size: 64px; margin: 20px 0; }
+            p { font-size: 18px; line-height: 1.6; color: #333; }
+            .highlight { background: #e8f5e8; padding: 15px; border-radius: 8px; margin: 20px 0; }
+            .bot-link { display: inline-block; background: #0088cc; color: white; padding: 15px 30px; text-decoration: none; border-radius: 25px; margin: 20px 0; font-size: 18px; }
+            .bot-link:hover { background: #006699; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="emoji">🎉</div>
+            <h1>Payment Successful!</h1>
+            <p>Your payment has been processed successfully.</p>
+            
+            <div class="highlight">
+                <strong>Your channel access link is being sent to you on Telegram right now!</strong>
+            </div>
+            
+            <p>Check your Telegram messages from <strong>@payblessedbot</strong> for your exclusive channel invite link.</p>
+            
+            <a href="https://t.me/payblessedbot" class="bot-link">Open Telegram Bot</a>
+            
+            <p><small>If you don't receive the link within 5 minutes, please contact support.</small></p>
+        </div>
+    </body>
+    </html>
+    '''
+
 @app.route('/payment-form', methods=['GET'])
 def payment_form():
-    return '''[<!DOCTYPE html>
+    return '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generate Payment Link</title>
+    <title>Premium Channel Access</title>
     <style>
         body {
             font-family: Arial, sans-serif;
             max-width: 600px;
-            margin: 50px auto;
+            margin: 20px auto;
             padding: 20px;
-            background-color: #f5f5f5;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
         }
         .container {
             background: white;
             padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
         }
         h1 {
             color: #333;
             text-align: center;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
             margin-bottom: 30px;
+            font-size: 16px;
+        }
+        .instructions {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+            border-left: 4px solid #2196f3;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #1976d2;
+            font-size: 18px;
+        }
+        .instructions ol {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .instructions li {
+            margin: 8px 0;
+            line-height: 1.5;
         }
         .form-group {
             margin-bottom: 20px;
         }
         label {
             display: block;
-            margin-bottom: 5px;
+            margin-bottom: 8px;
             font-weight: bold;
             color: #555;
+            font-size: 14px;
         }
         input, select {
             width: 100%;
             padding: 12px;
             border: 2px solid #ddd;
-            border-radius: 5px;
+            border-radius: 8px;
             font-size: 16px;
             box-sizing: border-box;
+            transition: border-color 0.3s;
         }
         input:focus, select:focus {
             outline: none;
             border-color: #4CAF50;
         }
+        small {
+            color: #666;
+            font-size: 12px;
+            display: block;
+            margin-top: 5px;
+        }
         button {
             width: 100%;
             padding: 15px;
-            background-color: #4CAF50;
+            background: linear-gradient(135deg, #4CAF50, #45a049);
             color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: 8px;
             font-size: 18px;
+            font-weight: bold;
             cursor: pointer;
             margin-top: 10px;
+            transition: all 0.3s;
         }
         button:hover {
-            background-color: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(76, 175, 80, 0.4);
         }
         button:disabled {
-            background-color: #cccccc;
+            background: #cccccc;
             cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }
         .result {
             margin-top: 20px;
-            padding: 15px;
-            border-radius: 5px;
+            padding: 20px;
+            border-radius: 8px;
             display: none;
         }
         .success {
-            background-color: #d4edda;
+            background: #d4edda;
             color: #155724;
             border: 1px solid #c3e6cb;
         }
         .error {
-            background-color: #f8d7da;
+            background: #f8d7da;
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
         .payment-link {
             word-break: break-all;
             background: #f8f9fa;
-            padding: 10px;
-            border-radius: 5px;
-            margin-top: 10px;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
             border: 1px solid #dee2e6;
+            font-family: monospace;
         }
         .copy-btn {
             width: auto;
-            padding: 8px 15px;
+            padding: 10px 20px;
             font-size: 14px;
             margin-top: 10px;
-            background-color: #007bff;
+            background: linear-gradient(135deg, #007bff, #0056b3);
         }
-        .copy-btn:hover {
-            background-color: #0056b3;
+        .emoji {
+            font-size: 24px;
+            margin-right: 8px;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>💳 Payment Link Generator</h1>
-        <p style="text-align: center; color: #666; margin-bottom: 20px;">
-            Generate Flutterwave payment links for Telegram channel access
-        </p>
+        <h1><span class="emoji">💳</span>Premium Channel Access</h1>
+        <p class="subtitle">Secure payment portal for exclusive content access</p>
         
-        <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-            <h3 style="margin-top: 0; color: #1976d2;">📋 How to get your Telegram ID:</h3>
-            <p style="margin-bottom: 0;">
-                1. Open Telegram and search for <strong>@raw_data_bot</strong><br>
-                2. Send any message to the bot<br>
-                3. Copy your <strong>user_id</strong> from the response<br>
-                4. Paste it in the form below
-            </p>
+        <div class="instructions">
+            <h3><span class="emoji">📋</span>How to Get Your Telegram ID:</h3>
+            <ol>
+                <li>Open Telegram and search for <strong>@raw_data_bot</strong></li>
+                <li>Send any message to the bot (like "hi")</li>
+                <li>Copy your <strong>user_id</strong> from the response</li>
+                <li>Paste it in the form below</li>
+            </ol>
+            <p><strong>Note:</strong> After payment, your channel invite link will be sent to your Telegram account instantly!</p>
         </div>
         
         <form id="paymentForm">
             <div class="form-group">
-                <label for="amount">Amount *</label>
-                <input type="number" id="amount" name="amount" required min="1" placeholder="1000">
+                <label for="amount"><span class="emoji">💰</span>Amount *</label>
+                <input type="number" id="amount" name="amount" required min="1" placeholder="Enter amount (e.g., 1000)">
             </div>
             
             <div class="form-group">
-                <label for="currency">Currency</label>
+                <label for="currency"><span class="emoji">💱</span>Currency</label>
                 <select id="currency" name="currency">
                     <option value="NGN">NGN (Nigerian Naira)</option>
                     <option value="USD">USD (US Dollar)</option>
@@ -447,22 +647,26 @@ def payment_form():
             </div>
             
             <div class="form-group">
-                <label for="email">Customer Email *</label>
-                <input type="email" id="email" name="email" required placeholder="customer@example.com">
+                <label for="email"><span class="emoji">📧</span>Email Address *</label>
+                <input type="email" id="email" name="email" required placeholder="your.email@example.com">
+                <small>This will be used for payment confirmation</small>
             </div>
             
             <div class="form-group">
-                <label for="telegram_user_id">Telegram User ID *</label>
+                <label for="telegram_user_id"><span class="emoji">🆔</span>Telegram User ID *</label>
                 <input type="text" id="telegram_user_id" name="telegram_user_id" required placeholder="123456789">
-                <small style="color: #666;">Get this by messaging @raw_data_bot on Telegram</small>
+                <small>Get this from @raw_data_bot on Telegram</small>
             </div>
             
             <div class="form-group">
-                <label for="telegram_username">Telegram Username (Optional)</label>
+                <label for="telegram_username"><span class="emoji">👤</span>Telegram Username (Optional)</label>
                 <input type="text" id="telegram_username" name="telegram_username" placeholder="username (without @)">
+                <small>Your Telegram username for easier identification</small>
             </div>
             
-            <button type="submit" id="generateBtn">Generate Payment Link</button>
+            <button type="submit" id="generateBtn">
+                <span class="emoji">🚀</span>Generate Secure Payment Link
+            </button>
         </form>
         
         <div id="result" class="result">
@@ -480,7 +684,7 @@ def payment_form():
             
             // Disable button and show loading
             generateBtn.disabled = true;
-            generateBtn.textContent = 'Generating...';
+            generateBtn.innerHTML = '<span class="emoji">⏳</span>Generating Secure Link...';
             resultDiv.style.display = 'none';
             
             // Get form data
@@ -507,20 +711,22 @@ def payment_form():
                 if (response.ok && result.status === 'success') {
                     // Success - show payment link
                     resultContent.innerHTML = `
-                        <h3>✅ Payment Link Generated Successfully!</h3>
+                        <h3><span class="emoji">✅</span>Payment Link Generated Successfully!</h3>
                         <p><strong>Transaction Reference:</strong> ${result.tx_ref}</p>
-                        <p><strong>Payment Link:</strong></p>
+                        <p><strong>Secure Payment Link:</strong></p>
                         <div class="payment-link">${result.payment_link}</div>
                         <button class="copy-btn" onclick="copyToClipboard('${result.payment_link}')">
-                            📋 Copy Link
+                            <span class="emoji">📋</span>Copy Link
                         </button>
+                        <p><small><strong>Important:</strong> After successful payment, your channel invite link will be sent to your Telegram account automatically!</small></p>
                     `;
                     resultDiv.className = 'result success';
                 } else {
                     // Error
                     resultContent.innerHTML = `
-                        <h3>❌ Failed to Generate Payment Link</h3>
+                        <h3><span class="emoji">❌</span>Failed to Generate Payment Link</h3>
                         <p><strong>Error:</strong> ${result.error || 'Unknown error occurred'}</p>
+                        <p>Please check your details and try again.</p>
                     `;
                     resultDiv.className = 'result error';
                 }
@@ -528,9 +734,9 @@ def payment_form():
             } catch (error) {
                 // Network error
                 resultContent.innerHTML = `
-                    <h3>❌ Network Error</h3>
+                    <h3><span class="emoji">🌐</span>Network Error</h3>
                     <p><strong>Error:</strong> ${error.message}</p>
-                    <p>Make sure your bot is running and try again.</p>
+                    <p>Please check your internet connection and try again.</p>
                 `;
                 resultDiv.className = 'result error';
             }
@@ -538,7 +744,7 @@ def payment_form():
             // Show result and reset button
             resultDiv.style.display = 'block';
             generateBtn.disabled = false;
-            generateBtn.textContent = 'Generate Payment Link';
+            generateBtn.innerHTML = '<span class="emoji">🚀</span>Generate Secure Payment Link';
         });
         
         function copyToClipboard(text) {
@@ -558,7 +764,8 @@ def payment_form():
         }
     </script>
 </body>
-</html>]'''
+</html>'''
+
 if __name__ == '__main__':
     # Log startup info
     logger.info("Starting Flutterwave-Telegram Bot...")
