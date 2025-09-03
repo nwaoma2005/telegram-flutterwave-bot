@@ -1,94 +1,154 @@
 import os
+import json
 import hmac
 import hashlib
+import requests
+import time
 import logging
-from flask import Flask, request, render_template, jsonify
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler
+from flask import Flask, request, jsonify
+from telegram import Bot, TelegramError
 
-# ==============================
-# Config
-# ==============================
-TELEGRAM_BOT_TOKEN = "8419563253:AAGT9t6T7MJ-3qCDV08gTZLtCsBeEd-hF_Q"
-FLW_SECRET_HASH = os.getenv("FLW_SECRET_HASH", "Blessed0704")  # must match Flutterwave dashboard
+# Logging setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# === Environment Variables ===
+FLUTTERWAVE_SECRET_KEY = os.getenv("FLUTTERWAVE_SECRET_KEY")
+FLUTTERWAVE_WEBHOOK_SECRET = os.getenv("FLUTTERWAVE_WEBHOOK_SECRET")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # Channel ID or username
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# Flask app
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+# === Flutterwave Bot Class ===
+class FlutterwavePaymentBot:
+    def __init__(self):
+        self.secret_key = FLUTTERWAVE_SECRET_KEY
+        self.webhook_secret = FLUTTERWAVE_WEBHOOK_SECRET
 
-# ==============================
-# Telegram Bot Handlers
-# ==============================
-dispatcher = Dispatcher(bot, None, workers=0)
+    def verify_webhook_signature(self, payload, signature):
+        """Check Flutterwave webhook authenticity"""
+        if not signature:
+            return False
+        if signature.startswith("v1="):
+            signature = signature[3:]
+        expected_signature = hmac.new(
+            self.webhook_secret.encode("utf-8"),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected_signature, signature)
 
-def start(update, context):
-    """Handles /start command"""
-    user = update.effective_user
-    user_id = user.id
-    username = user.username or user.first_name
+    def verify_payment(self, transaction_id):
+        """Verify Flutterwave payment"""
+        url = f"https://api.flutterwave.com/v3/transactions/{transaction_id}/verify"
+        headers = {
+            "Authorization": f"Bearer {self.secret_key}",
+            "Content-Type": "application/json"
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Payment verification error: {e}")
+            return None
 
-    welcome_text = (
-        f"👋 Hello {username}!\n\n"
-        "Welcome to the Flutterwave Payment Bot.\n\n"
-        "👉 Use the payment form to make a test payment:\n"
-        "https://telegram-flutterwave-bot-2.onrender.com/payment-form"
-    )
-    context.bot.send_message(chat_id=user_id, text=welcome_text)
+    def add_user_to_channel(self, user_id, username=None):
+        """Invite user to Telegram channel"""
+        try:
+            invite_link = bot.create_chat_invite_link(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                member_limit=1,
+                name=f"Payment access for {user_id}"
+            )
+            message = (
+                f"🎉 Hello @{username}! Payment successful!\n\n"
+                if username else "🎉 Payment successful!\n\n"
+            )
+            message += f"Here’s your channel access link:\n{invite_link.invite_link}"
+            bot.send_message(chat_id=user_id, text=message)
+            return True
+        except TelegramError as e:
+            logger.error(f"Channel invite error: {e}")
+            return False
 
-dispatcher.add_handler(CommandHandler("start", start))
+payment_bot = FlutterwavePaymentBot()
 
-# ==============================
-# Telegram Webhook
-# ==============================
+# === Routes ===
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "Bot is live"})
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "healthy"})
+
+# === Telegram Webhook ===
 @app.route(f"/webhook/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    """Handles Telegram updates"""
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok", 200
+    update = request.get_json()
+    logger.info(f"Telegram update: {update}")
 
-# ==============================
-# Payment Form (Frontend)
-# ==============================
-@app.route("/payment-form")
-def payment_form():
-    return render_template("payment_form.html")
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "")
 
-# ==============================
-# Flutterwave Webhook
-# ==============================
+        if text == "/start":
+            bot.send_message(
+                chat_id,
+                "👋 Welcome! Use /pay to get your payment link."
+            )
+
+        elif text == "/pay":
+            # Create a Flutterwave payment link
+            tx_ref = f"payment_{chat_id}_{int(time.time())}"
+            payload = {
+                "tx_ref": tx_ref,
+                "amount": "500",  # test amount
+                "currency": "NGN",
+                "redirect_url": "https://your-domain.com/payment-success",
+                "customer": {"email": f"user{chat_id}@test.com", "name": f"User_{chat_id}"},
+                "meta": {"telegram_user_id": str(chat_id)},
+                "customizations": {"title": "Channel Access", "description": "Payment for channel access"}
+            }
+            headers = {"Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}", "Content-Type": "application/json"}
+            r = requests.post("https://api.flutterwave.com/v3/payments", json=payload, headers=headers)
+            if r.status_code == 200:
+                payment_link = r.json()["data"]["link"]
+                bot.send_message(chat_id, f"💳 Complete your payment here:\n{payment_link}")
+            else:
+                bot.send_message(chat_id, "⚠️ Failed to create payment link. Try again.")
+
+    return jsonify({"ok": True})
+
+# === Flutterwave Webhook ===
 @app.route("/webhook/flutterwave", methods=["POST"])
 def flutterwave_webhook():
-    """Handles Flutterwave payment webhook"""
     signature = request.headers.get("verif-hash")
-    if not signature or signature != FLW_SECRET_HASH:
-        logging.warning("Invalid webhook signature")
-        return jsonify({"status": "error", "message": "Invalid signature"}), 400
+    payload = request.get_data()
+
+    if not payment_bot.verify_webhook_signature(payload, signature):
+        logger.warning("Invalid webhook signature")
+        return jsonify({"error": "Invalid signature"}), 400
 
     data = request.get_json()
-    logging.info(f"Webhook received: {data}")
+    logger.info(f"Flutterwave event: {data}")
 
-    # You can send Telegram notification here
-    chat_id = <PUT_YOUR_TELEGRAM_CHAT_ID_HERE>  # optional
-    try:
-        bot.send_message(chat_id=chat_id, text=f"💰 Payment received: {data}")
-    except Exception as e:
-        logging.error(f"Failed to send Telegram message: {e}")
+    if data.get("event") == "charge.completed" and data.get("data", {}).get("status") == "successful":
+        transaction_id = data["data"].get("id")
+        verification = payment_bot.verify_payment(transaction_id)
 
-    return jsonify({"status": "success"}), 200
+        if verification and verification.get("status") == "success":
+            meta = verification["data"].get("meta", {})
+            user_id = int(meta.get("telegram_user_id", 0))
+            if user_id:
+                payment_bot.add_user_to_channel(user_id)
+                return jsonify({"status": "success"})
+    return jsonify({"status": "ignored"})
 
-# ==============================
-# Root route
-# ==============================
-@app.route("/")
-def home():
-    return "✅ Telegram + Flutterwave bot is running!"
-
-# ==============================
-# Main entry
-# ==============================
+# === Run Server ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
