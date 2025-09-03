@@ -311,7 +311,254 @@ def create_payment():
     except Exception as e:
         logger.error(f"Error creating payment: {e}")
         return jsonify({"error": "Internal server error"}), 500
+@app.route('/payment-form', methods=['GET'])
+def payment_form():
+    return '''[<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generate Payment Link</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 18px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .payment-link {
+            word-break: break-all;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            border: 1px solid #dee2e6;
+        }
+        .copy-btn {
+            width: auto;
+            padding: 8px 15px;
+            font-size: 14px;
+            margin-top: 10px;
+            background-color: #007bff;
+        }
+        .copy-btn:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>💳 Payment Link Generator</h1>
+        <p style="text-align: center; color: #666; margin-bottom: 20px;">
+            Generate Flutterwave payment links for Telegram channel access
+        </p>
+        
+        <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+            <h3 style="margin-top: 0; color: #1976d2;">📋 How to get your Telegram ID:</h3>
+            <p style="margin-bottom: 0;">
+                1. Open Telegram and search for <strong>@raw_data_bot</strong><br>
+                2. Send any message to the bot<br>
+                3. Copy your <strong>user_id</strong> from the response<br>
+                4. Paste it in the form below
+            </p>
+        </div>
+        
+        <form id="paymentForm">
+            <div class="form-group">
+                <label for="amount">Amount *</label>
+                <input type="number" id="amount" name="amount" required min="1" placeholder="1000">
+            </div>
+            
+            <div class="form-group">
+                <label for="currency">Currency</label>
+                <select id="currency" name="currency">
+                    <option value="NGN">NGN (Nigerian Naira)</option>
+                    <option value="USD">USD (US Dollar)</option>
+                    <option value="GHS">GHS (Ghanaian Cedi)</option>
+                    <option value="KES">KES (Kenyan Shilling)</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="email">Customer Email *</label>
+                <input type="email" id="email" name="email" required placeholder="customer@example.com">
+            </div>
+            
+            <div class="form-group">
+                <label for="telegram_user_id">Telegram User ID *</label>
+                <input type="text" id="telegram_user_id" name="telegram_user_id" required placeholder="123456789">
+                <small style="color: #666;">Get this by messaging @raw_data_bot on Telegram</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="telegram_username">Telegram Username (Optional)</label>
+                <input type="text" id="telegram_username" name="telegram_username" placeholder="username (without @)">
+            </div>
+            
+            <button type="submit" id="generateBtn">Generate Payment Link</button>
+        </form>
+        
+        <div id="result" class="result">
+            <div id="resultContent"></div>
+        </div>
+    </div>
 
+    <script>
+        document.getElementById('paymentForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const generateBtn = document.getElementById('generateBtn');
+            const resultDiv = document.getElementById('result');
+            const resultContent = document.getElementById('resultContent');
+            
+            // Disable button and show loading
+            generateBtn.disabled = true;
+            generateBtn.textContent = 'Generating...';
+            resultDiv.style.display = 'none';
+            
+            // Get form data
+            const formData = {
+                amount: parseInt(document.getElementById('amount').value),
+                currency: document.getElementById('currency').value,
+                email: document.getElementById('email').value,
+                telegram_user_id: document.getElementById('telegram_user_id').value,
+                telegram_username: document.getElementById('telegram_username').value
+            };
+            
+            try {
+                // Make API call to your bot
+                const response = await fetch('https://telegram-flutterwave-bot-2.onrender.com/create-payment', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.status === 'success') {
+                    // Success - show payment link
+                    resultContent.innerHTML = `
+                        <h3>✅ Payment Link Generated Successfully!</h3>
+                        <p><strong>Transaction Reference:</strong> ${result.tx_ref}</p>
+                        <p><strong>Payment Link:</strong></p>
+                        <div class="payment-link">${result.payment_link}</div>
+                        <button class="copy-btn" onclick="copyToClipboard('${result.payment_link}')">
+                            📋 Copy Link
+                        </button>
+                    `;
+                    resultDiv.className = 'result success';
+                } else {
+                    // Error
+                    resultContent.innerHTML = `
+                        <h3>❌ Failed to Generate Payment Link</h3>
+                        <p><strong>Error:</strong> ${result.error || 'Unknown error occurred'}</p>
+                    `;
+                    resultDiv.className = 'result error';
+                }
+                
+            } catch (error) {
+                // Network error
+                resultContent.innerHTML = `
+                    <h3>❌ Network Error</h3>
+                    <p><strong>Error:</strong> ${error.message}</p>
+                    <p>Make sure your bot is running and try again.</p>
+                `;
+                resultDiv.className = 'result error';
+            }
+            
+            // Show result and reset button
+            resultDiv.style.display = 'block';
+            generateBtn.disabled = false;
+            generateBtn.textContent = 'Generate Payment Link';
+        });
+        
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(function() {
+                alert('Payment link copied to clipboard!');
+            }, function(err) {
+                console.error('Could not copy text: ', err);
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('Payment link copied to clipboard!');
+            });
+        }
+    </script>
+</body>
+</html>]'''
 if __name__ == '__main__':
     # Log startup info
     logger.info("Starting Flutterwave-Telegram Bot...")
